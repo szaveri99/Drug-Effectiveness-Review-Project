@@ -1,0 +1,451 @@
+---
+title: "Drug Review Effectiveness"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    navbar:
+      - { title: "About", href: "https://en.wikipedia.org/wiki/Drug_Effectiveness_Review_Project",align: left }
+    social: [ "twitter", "instagram", "menu" ]
+---
+
+<style>
+.chart-c{
+background-color : #afafaf;
+}
+</style>
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(ggplot2)
+library(plotly)
+library(DT)
+library(rapportools)
+library(rvest)
+library(magick)
+
+source("global.R")
+```
+
+
+# Dashboard
+
+Column {data-width=500, .tabset}
+-----------------------------------------------------------------------
+
+### Search
+
+```{r,fig.keep='all'}
+top_data <- read.csv("word_n_data/drugReviewData.csv")
+year <- c("2008","2009","2010","2011","2012","2013","2014","2015","2016","2017")
+drugdata <- top_data
+drugdata$Year_of_Review <- as.factor(substr(drugdata$date ,1,4))
+
+h3(icon("search"),tags$b("Search Drug"))
+                                              selectizeInput(
+                                                inputId = "srch", label = "Enter Drug Name to find",
+                                                options= list(placeholder = "enter your drug name",maxItems=1),
+                                                choices = unique(top_data$drugName),
+                                                #onInitialize=I('function(){this.setValue(" ");}'),
+                                                multiple = TRUE,
+                                                width = "400px"
+                                              )
+conditionalPanel(
+                                                condition = "input.srch.length > 0",
+                                                sliderInput("rate","Rating",1,10,5)
+                                              )                                              
+
+renderPlotly({
+
+dt <- drugdata[drugdata$drugName == input$srch,]
+if(length(input$srch)<=0 | nrow(dt)==0){
+  return()
+  #plotly_empty()
+}
+
+else{
+   p <-  ggplot(dt, aes(Year_of_Review, usefulCount)) +
+    geom_point(aes(colour = category_class), size = 2) +
+    labs(title = input$srch)+labs(col = "Category")
+  
+   ggplotly(p)%>%layout(height = 330, width = 600)
+  }
+
+})
+```
+
+### Word Cloud
+
+```{r}   
+actionButton("update"," ",icon = icon("redo-alt"),style="background-color: #afafaf")
+   
+words_srch <- reactive({
+                
+                srch_drug <- srch(input$srch,input$rate)
+                if(!is.null(srch_drug))
+                  review_data(srch_drug)
+                else
+                  return()
+})
+
+
+input_file <- reactive({
+  input$update 
+        isolate({
+            withProgress({
+                setProgress(message = "Processing Text...")
+                
+                 wc_text <- words_srch() 
+                 if(is.null(wc_text)){
+                     return() 
+                 }
+                
+                else {
+                    corp_data <- clean_data(wc_text)
+                }  
+            })
+        })  
+    })
+    
+        
+wordcloud_rep <- repeatable(wordcloud)
+        
+      
+renderPlot({
+            withProgress({
+                setProgress(message = "Creating Plot....")
+                v <- input_file() 
+                if(is.null(v)) return(print(invisible("no data!!")))
+                else{
+                wordcloud_rep(names(v),v,scale = c(4,0.5),
+                              min.freq = 3,max.words = 800,
+                              rot.per = 0.3,
+                              colors = brewer.pal(8,"Set1"))
+                }
+            })
+        })
+
+```
+
+### Data
+
+```{r}
+renderDataTable(top_data[top_data$drugName == input$srch & top_data$rating == input$rate
+                         ,c(1,2,4,5  )],
+                extensions = 'Buttons', options = list( dom = 'Bfrtip', 
+                                                        buttons = list('copy', 'print', list(
+                                                        extend = 'collection',
+                                                        buttons = c('csv', 'excel', 'pdf'),
+                                                        text = 'Download'
+                                                      ))))
+
+```
+
+Column {data-width=250}
+-----------------------------------------------------------------------
+
+### Counts {.value-box}
+
+```{r}
+renderValueBox({
+  dt <- top_data[top_data$drugName == input$srch & top_data$rating == input$rate
+                         ,c(1,2,4,5  )]
+  
+  if(length(input$srch) <= 0 | nrow(dt) == 0){
+    valueBox(0,'out of 100 people think the drug works',icon = "fa-comments")
+  }
+  else{
+   val <- round(mean(top_data[input$srch == top_data$drugName & top_data$rating == input$rate,6]),0)
+   if(val > 100 ){
+     val <- 90
+   }
+   valueBox(val,'out of 100 people think the drug works',icon = "fa-comments")
+  }
+})
+
+
+```
+
+### Rating given to according to Review by people
+
+```{r}
+  renderGauge({
+  dt <- top_data[top_data$drugName == input$srch & top_data$rating == input$rate,c(1,2,4,5)]
+  
+  if((length(input$srch) <= 0 | nrow(dt) == 0)   ){
+    gauge(0,min = 0,max = 10 ,label = "Rating",sectors = gaugeSectors(
+        danger = c(0,4)))
+  }
+  else{
+    gauge(input$rate,min = 0,max = 10 ,label = "Rating",sectors = gaugeSectors(
+        success = c(8,10),warning = c(5,7),danger = c(1,4)))
+   }    
+ })  
+```
+
+### Positive Sentiment
+
+```{r}
+  renderGauge({
+  dt <- top_data[top_data$drugName == input$srch & top_data$rating == input$rate,c(1,2,4,5)]
+    
+  if(length(input$srch) <= 0 |  nrow(dt) == 0 ){
+    gauge(0,min = 0,max = 100 ,label = "Liked by People",sectors = gaugeSectors(
+        danger = c(0,4)))
+  }
+  else{
+    rev <- top_data[top_data$drugName == input$srch & top_data$rating == input$rate,3]
+    pos_sent <- sent(rev)
+    total <- sum(pos_sent[,2])
+    # if(total == 0){
+    #   gauge(0,min = 0,max = 100 ,label = "No data!!",symbol = "%" ,sectors = gaugeSectors(
+    #     danger = c(0,4)))
+    #   
+    # }
+    
+    l <- list(5,7,8,10)
+    td=0
+    for(i in l){
+      td=td+pos_sent[i,2]
+    }
+    
+    pos_vals <- round((td/total)*100,1) 
+  
+    gauge(pos_vals,min = 0,max = 100 ,label = "Liked by People",symbol = "%", sectors = gaugeSectors(success=c(70,100),warning=c(40,69),danger = c(1,39)))
+  }   
+ })  
+```
+
+### Negative Sentiment
+
+```{r}
+renderGauge({
+  dt <- top_data[top_data$drugName == input$srch & top_data$rating == input$rate,c(1,2,4,5)]
+    
+  if(length(input$srch) <= 0 |  nrow(dt) == 0 ){
+    gauge(0,min = 0,max = 100 ,label = "Disliked by People",sectors = gaugeSectors(
+        danger = c(0,4)))
+  }
+  else{
+    rev <- top_data[top_data$drugName == input$srch & top_data$rating == input$rate,3]
+    neg_sent <- sent(rev)
+    total <- sum(neg_sent[,2])
+    l <- list(1,2,3,4,6,9)
+    td=0
+    for(i in l){
+      td=td+neg_sent[i,2]
+    }
+    neg_vals <- round((td/total)*100,1) 
+  
+  
+    gauge(neg_vals,min = 0,max = 100 ,label = "Disliked by people",symbol = "%",sectors = gaugeSectors(
+   success=c(1,30),warning=c(31,64),danger = c(65,100)
+  ))
+ }   
+})
+
+```
+
+Column {data-width=250}
+-----------------------------------------------------------------------
+
+### Side Effects {.side-effect}
+
+```{r}
+h3(tags$b("Side Effects "),icon("dizzy"))
+
+side_eff_list <- reactive({
+  
+if(length(input$srch)<=0){
+  return(NULL)
+}
+
+else{
+td <- 0  
+td <- top_data[top_data$drugName == input$srch,3]
+side_effect <- scan('word_n_data/side_eff.txt',what = character(),quote="",sep="\n")
+side_effect <- readLines(textConnection(side_effect))
+
+td <- data.frame(response = td)
+
+z <- sapply(side_effect,function(x) grepl(tolower(x),tolower(td$response)))
+
+td$Words <- apply(z, 1, function(i) paste0(names(i)[i], collapse = ","))
+# count the number of matching words
+#td$Count <- apply(z, 1, function(i) sum(i))
+
+df <- paste(td[(!is.empty(td$Words)),2],collapse = " ")
+if(is.empty(df)){
+  return(NULL)
+}
+st <- gsub(",", " ", df)
+
+rem_dup.one <- function(x){
+  paste(unique(tolower(trimws(unlist(strsplit(x,split="(?!')[ [:punct:]]",fixed=F,perl=T))))),collapse = " ")
+}
+
+rem_dup.vector <- Vectorize(rem_dup.one,USE.NAMES = F)
+rem <- rem_dup.vector(st)
+
+a <- c()
+
+for(i in side_effect){
+  if(grepl(i,rem,ignore.case = TRUE)){
+    a <- c(a,i)    
+  }
+}
+  a
+ }  
+})
+
+renderUI({
+  
+  sd <- side_eff_list()
+  if(is.null(sd)){
+    return('')
+  } 
+  
+  else{
+    if(length(sd)>10){
+      sd <- sd[1:8]
+      HTML(paste("<li>",sd), sep="<br/>")
+    }
+    else{
+     HTML(paste("<li>",sd), sep="<br/>")
+    }
+  }
+})
+```
+
+### GIPHY {.chart-c}
+
+```{r}
+
+# # health <- img(src="https://monophy.com/media/xUOxf088YAq0lLjR1S/monophy.gif",height = '200px',width='250px')
+# s <- "https://monophy.com/gifs/antibiotics-world-health-organization-antibiotic-xUOxf088YAq0lLjR1S"
+# 
+# health <- img(src=s,height = '200px',width='250px')
+# health
+
+med <- image_read("https://media2.giphy.com/media/l3mZlbF9pQ0jRG6u4/giphy.gif")
+med
+```
+
+# Description
+
+Column  {.sidebar}
+-------------------------------------
+    
+### Drug Information
+    
+```{r}
+tags$p(br())
+h4(tags$b("NOTE : "))
+
+tags$p("Medicines can help you feel better and get well when you are sick. But if you don’t follow the directions, medicines can hurt you.",br(),
+"You can lower your chances of side effects from medicines by carefully following the directions on the medicine label or from your pharmacist, doctor, or nurse.",br(),
+"Medicines should be taken under the surveillance and supervision of professinal Doctors.",br(),
+"The Description of Drugs are for the public information not to follow them...")
+
+```
+   
+Column
+-------------------------------------
+   
+### Description Document
+
+```{r}
+review_para <- "DERP reports include up-to-date clinical evidence on efficacy, adverse events, and safety information for the drugs reviewed.These reports and research products are not usage guidelines, nor should they be read as an endorsement of or recommendation for any particular drug, use or approach. Rather, DERP reports are used by policy makers to develop criteria for drug coverage, such as prior authorizations, clinical edits, drug utilization management policies, and provider or patient education materials. DERP research products include a comprehensive search of the global evidence, an objective appraisal of the quality of the studies found, and a tho  rough synthesis of high-quality evidence. Policymakers are able to use these reports and research products to make informed policy decisions that improve patient outcomes and contain costs."
+
+input_drug <- reactive({
+  if(length(input$srch)<=0){
+    return(' ')
+  }
+  else{
+    input$srch
+  }
+})
+para <- reactive({
+  if(length(input$srch) <= 0){
+    return()
+  }
+  else{
+    url_descp <- "https://en.wikipedia.org/wiki/"
+    s <- input$srch
+    if(grepl("/",s)){
+      s <- gsub(".*/","",s)
+    }
+
+    if(grepl(" ",s)){
+      s <- gsub(" ","",s) 
+    }
+    url_descp <- paste(url_descp,s,sep="")
+    paragraphs <- read_html(url_descp) %>% html_nodes("p")%>% html_text()
+    if(paragraphs[1] == "\n"){
+      text <- gsub("\\[[0-9]\\]","",paragraphs[2])
+    }
+    else{
+      text <- gsub("\\[[0-9]\\]","",paragraphs[1])
+    }
+    return(text)
+  }
+})
+
+renderUI({
+  
+  if(length(input$srch)<=0){
+    "data not available"
+  }
+  else{
+    
+    st <- paste(side_eff_list(),sep=" ",collapse = ", ")
+    withProgress({
+     setProgress(message = "Preparing the Document...")
+ 
+    HTML(paste(h2(tags$b("Medicine Name : ",tags$i(input_drug()))),
+               h4(tags$b('About')),
+               tags$p(para()),
+               h4(tags$b('Side Effects')),
+               tags$p(st),
+               #HTML(paste("<li>",side_eff_list(),"<br/>")),
+               h4(tags$b('Public Review')),
+               tags$p(review_para),
+               sep = "<br/>"
+               ),sep = "<br/>")
+    })
+  }
+})
+
+renderPlotly({
+
+dt <- drugdata[drugdata$drugName == input$srch,]
+if(length(input$srch)<=0 | nrow(dt)==0){
+  return()
+  #plotly_empty()
+}
+
+else{
+   p <-  ggplot(dt, aes(Year_of_Review, usefulCount)) +
+    geom_point(aes(colour = category_class), size = 2) +
+    labs(title = input$srch)+labs(col = "Category")
+
+   ggplotly(p)
+  }
+})
+```
+
+# Request
+
+Column  {.sidebar data-width=300}
+-------------------------------------
+### Add your Request
+
+```{r}
+tags$p(br(),br(),br(),br(),br(),br(),tags$b(h3("Coming Soon..")))
+```
+
+Column
+-------------------------------------
+### Add Request
